@@ -473,10 +473,8 @@ void bc_disasm(std::ostream& pyc_output, PycRef<PycCode> code, PycModule* mod,
             case Pyc::INSTRUMENTED_POP_JUMP_IF_FALSE_A:
             case Pyc::INSTRUMENTED_POP_JUMP_IF_TRUE_A:
                 {
-                    /* TODO: Fix offset based on CACHE instructions.
-                       Offset is relative to next non-CACHE instruction
-                       and thus will be printed lower than actual value.
-                       See TODO @ END_FOR ASTree.cpp */
+                    /* In 3.10+, jump arguments are instruction offsets rather than
+                       byte offsets, so convert them back to raw bytecode positions. */
                     int offs = operand;
                     if (mod->verCompare(3, 10) >= 0)
                         offs *= sizeof(uint16_t); // BPO-27129
