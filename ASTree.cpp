@@ -1309,7 +1309,6 @@ PycRef<ASTNode> BuildFromCode(PycRef<PycCode> code, PycModule* mod)
                     /* Offset is relative in these cases */
                     offs += pos;
                 }
-        case Pyc::GET_AWAITABLE_A:
 
                 if (cond.type() == ASTNode::NODE_COMPARE
                         && cond.cast<ASTCompare>()->op() == ASTCompare::CMP_EXCEPTION) {
