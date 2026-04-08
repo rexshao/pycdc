@@ -106,6 +106,87 @@ static bool MergeMappingArgument(const PycRef<ASTMap>& dst, const PycRef<ASTNode
     return false;
 }
 
+static bool IsCodeObjectNode(const PycRef<ASTNode>& node)
+{
+    PycRef<ASTObject> obj = node.try_cast<ASTObject>();
+    if (obj == nullptr)
+        return false;
+
+    const int type = obj->object().type();
+    return type == PycObject::TYPE_CODE || type == PycObject::TYPE_CODE2;
+}
+
+static PycRef<PycCode> GetCodeObjectFromNode(const PycRef<ASTNode>& node)
+{
+    PycRef<ASTObject> obj = node.try_cast<ASTObject>();
+    if (obj == nullptr)
+        return nullptr;
+
+    return obj->object().try_cast<PycCode>();
+}
+
+static PycRef<PycCode> GetFunctionCodeObject(const PycRef<ASTNode>& node)
+{
+    if (node.type() != ASTNode::NODE_FUNCTION)
+        return nullptr;
+
+    return GetCodeObjectFromNode(node.cast<ASTFunction>()->code());
+}
+
+static void AppendFunctionDefaults(ASTFunction::defarg_t& defArgs,
+        const PycRef<ASTNode>& defaults)
+{
+    if (defaults == nullptr)
+        return;
+
+    if (defaults.type() == ASTNode::NODE_TUPLE) {
+        for (const auto& value : defaults.cast<ASTTuple>()->values())
+            defArgs.push_back(value);
+        return;
+    }
+
+    if (defaults.type() == ASTNode::NODE_OBJECT) {
+        PycRef<PycObject> obj = defaults.cast<ASTObject>()->object();
+        if (obj->type() == PycObject::TYPE_TUPLE || obj->type() == PycObject::TYPE_SMALL_TUPLE) {
+            for (const auto& value : obj.cast<PycTuple>()->values())
+                defArgs.push_back(new ASTObject(value));
+            return;
+        }
+    }
+
+    defArgs.push_back(defaults);
+}
+
+static void AppendFunctionKwDefaults(ASTFunction::defarg_t& kwDefArgs,
+        const PycRef<ASTNode>& defaults)
+{
+    if (defaults == nullptr)
+        return;
+
+    if (defaults.type() == ASTNode::NODE_CONST_MAP) {
+        for (const auto& value : defaults.cast<ASTConstMap>()->values())
+            kwDefArgs.push_back(value);
+        return;
+    }
+
+    if (defaults.type() == ASTNode::NODE_MAP) {
+        for (const auto& item : defaults.cast<ASTMap>()->values())
+            kwDefArgs.push_back(item.second);
+        return;
+    }
+
+    if (defaults.type() == ASTNode::NODE_OBJECT) {
+        PycRef<PycObject> obj = defaults.cast<ASTObject>()->object();
+        if (obj->type() == PycObject::TYPE_DICT) {
+            for (const auto& item : obj.cast<PycDict>()->values())
+                kwDefArgs.push_back(new ASTObject(std::get<1>(item)));
+            return;
+        }
+    }
+
+    kwDefArgs.push_back(defaults);
+}
+
 /* compiler generates very, VERY similar byte code for if/else statement block and if-expression
  *  statement
  *      if a: b = 1
@@ -650,14 +731,12 @@ PycRef<ASTNode> BuildFromCode(PycRef<PycCode> code, PycModule* mod)
                     PycRef<ASTNode> param = stack.top();
                     stack.pop();
                     if (param.type() == ASTNode::NODE_FUNCTION) {
-                        PycRef<ASTNode> fun_code = param.cast<ASTFunction>()->code();
-                        PycRef<PycCode> code_src = fun_code.cast<ASTObject>()->object().cast<PycCode>();
-                        PycRef<PycString> function_name = code_src->name();
-                        if (function_name->isEqual("<lambda>")) {
+                        PycRef<PycCode> code_src = GetFunctionCodeObject(param);
+                        if (code_src == nullptr || code_src->name()->isEqual("<lambda>")) {
                             pparamList.push_front(param);
                         } else {
                             // Decorator used
-                            PycRef<ASTNode> decor_name = new ASTName(function_name);
+                            PycRef<ASTNode> decor_name = new ASTName(code_src->name());
                             curblock->append(new ASTStore(param, decor_name));
 
                             pparamList.push_front(decor_name);
@@ -767,14 +846,12 @@ PycRef<ASTNode> BuildFromCode(PycRef<PycCode> code, PycModule* mod)
                     PycRef<ASTNode> param = stack.top();
                     stack.pop();
                     if (param.type() == ASTNode::NODE_FUNCTION) {
-                        PycRef<ASTNode> fun_code = param.cast<ASTFunction>()->code();
-                        PycRef<PycCode> code_src = fun_code.cast<ASTObject>()->object().cast<PycCode>();
-                        PycRef<PycString> function_name = code_src->name();
-                        if (function_name->isEqual("<lambda>")) {
+                        PycRef<PycCode> code_src = GetFunctionCodeObject(param);
+                        if (code_src == nullptr || code_src->name()->isEqual("<lambda>")) {
                             pparamList.push_front(param);
                         } else {
                             // Decorator used
-                            PycRef<ASTNode> decor_name = new ASTName(function_name);
+                            PycRef<ASTNode> decor_name = new ASTName(code_src->name());
                             curblock->append(new ASTStore(param, decor_name));
 
                             pparamList.push_front(decor_name);
@@ -1869,24 +1946,40 @@ PycRef<ASTNode> BuildFromCode(PycRef<PycCode> code, PycModule* mod)
                 PycRef<ASTNode> fun_code = stack.top();
                 stack.pop();
 
-                /* Test for the qualified name of the function (at TOS) */
-                int tos_type = fun_code.cast<ASTObject>()->object().type();
-                if (tos_type != PycObject::TYPE_CODE &&
-                    tos_type != PycObject::TYPE_CODE2) {
+                ASTFunction::defarg_t defArgs, kwDefArgs;
+                if (!IsCodeObjectNode(fun_code) && !stack.empty() && IsCodeObjectNode(stack.top())) {
                     fun_code = stack.top();
                     stack.pop();
                 }
 
-                ASTFunction::defarg_t defArgs, kwDefArgs;
-                const int defCount = operand & 0xFF;
-                const int kwDefCount = (operand >> 8) & 0xFF;
-                for (int i = 0; i < defCount; ++i) {
-                    defArgs.push_front(stack.top());
-                    stack.pop();
-                }
-                for (int i = 0; i < kwDefCount; ++i) {
-                    kwDefArgs.push_front(stack.top());
-                    stack.pop();
+                if (mod->verCompare(3, 6) >= 0) {
+                    const int flags = operand;
+
+                    if ((flags & 0x08) != 0 && !stack.empty())
+                        stack.pop();
+                    if ((flags & 0x04) != 0 && !stack.empty())
+                        stack.pop();
+                    if ((flags & 0x02) != 0 && !stack.empty()) {
+                        PycRef<ASTNode> kwDefaults = stack.top();
+                        stack.pop();
+                        AppendFunctionKwDefaults(kwDefArgs, kwDefaults);
+                    }
+                    if ((flags & 0x01) != 0 && !stack.empty()) {
+                        PycRef<ASTNode> defaults = stack.top();
+                        stack.pop();
+                        AppendFunctionDefaults(defArgs, defaults);
+                    }
+                } else {
+                    const int defCount = operand & 0xFF;
+                    const int kwDefCount = (operand >> 8) & 0xFF;
+                    for (int i = 0; i < defCount; ++i) {
+                        defArgs.push_front(stack.top());
+                        stack.pop();
+                    }
+                    for (int i = 0; i < kwDefCount; ++i) {
+                        kwDefArgs.push_front(stack.top());
+                        stack.pop();
+                    }
                 }
                 stack.push(new ASTFunction(fun_code, defArgs, kwDefArgs));
             }
@@ -3650,7 +3743,11 @@ void print_src(PycRef<ASTNode> node, PycModule* mod, std::ostream& pyc_output)
             /* Actual named functions are NODE_STORE with a name */
             pyc_output << "(lambda ";
             PycRef<ASTNode> code = node.cast<ASTFunction>()->code();
-            PycRef<PycCode> code_src = code.cast<ASTObject>()->object().cast<PycCode>();
+            PycRef<PycCode> code_src = GetCodeObjectFromNode(code);
+            if (code_src == nullptr) {
+                pyc_output << "<function>)";
+                break;
+            }
             ASTFunction::defarg_t defargs = node.cast<ASTFunction>()->defargs();
             ASTFunction::defarg_t kwdefargs = node.cast<ASTFunction>()->kwdefargs();
             auto da = defargs.cbegin();
@@ -3690,8 +3787,13 @@ void print_src(PycRef<ASTNode> node, PycModule* mod, std::ostream& pyc_output)
             PycRef<ASTNode> src = node.cast<ASTStore>()->src();
             PycRef<ASTNode> dest = node.cast<ASTStore>()->dest();
             if (src.type() == ASTNode::NODE_FUNCTION) {
-                PycRef<ASTNode> code = src.cast<ASTFunction>()->code();
-                PycRef<PycCode> code_src = code.cast<ASTObject>()->object().cast<PycCode>();
+                PycRef<PycCode> code_src = GetFunctionCodeObject(src);
+                if (code_src == nullptr) {
+                    print_src(dest, mod, pyc_output);
+                    pyc_output << " = ";
+                    print_src(src, mod, pyc_output);
+                    break;
+                }
                 bool isLambda = false;
 
                 if (strcmp(code_src->name()->value(), "<lambda>") == 0) {
@@ -3945,7 +4047,7 @@ void decompyle(PycRef<PycCode> code, PycModule* mod, std::ostream& pyc_output)
     PycRef<ASTNode> source = BuildFromCode(code, mod);
 
     PycRef<ASTNodeList> clean = source.cast<ASTNodeList>();
-    if (cleanBuild) {
+    if (cleanBuild && clean->nodes().size() != 0) {
         // The Python compiler adds some stuff that we don't really care
         // about, and would add extra code for re-compilation anyway.
         // We strip these lines out here, and then add a "pass" statement
