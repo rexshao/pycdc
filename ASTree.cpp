@@ -106,6 +106,80 @@ static bool MergeMappingArgument(const PycRef<ASTMap>& dst, const PycRef<ASTNode
     return false;
 }
 
+static bool AppendSequenceArgument(const PycRef<ASTList>& dst, const PycRef<ASTNode>& src)
+{
+    if (src == nullptr)
+        return false;
+
+    if (src.type() == ASTNode::NODE_TUPLE) {
+        for (const auto& item : src.cast<ASTTuple>()->values())
+            dst->add(item);
+        return true;
+    }
+
+    if (src.type() == ASTNode::NODE_LIST) {
+        for (const auto& item : src.cast<ASTList>()->values())
+            dst->add(item);
+        return true;
+    }
+
+    if (src.type() == ASTNode::NODE_SET) {
+        for (const auto& item : src.cast<ASTSet>()->values())
+            dst->add(item);
+        return true;
+    }
+
+    if (src.type() == ASTNode::NODE_OBJECT) {
+        PycRef<PycObject> obj = src.cast<ASTObject>()->object();
+        if (obj->type() == PycObject::TYPE_TUPLE || obj->type() == PycObject::TYPE_SMALL_TUPLE
+                || obj->type() == PycObject::TYPE_LIST || obj->type() == PycObject::TYPE_SET
+                || obj->type() == PycObject::TYPE_FROZENSET) {
+            for (const auto& item : obj.cast<PycSimpleSequence>()->values())
+                dst->add(new ASTObject(item));
+            return true;
+        }
+    }
+
+    return false;
+}
+
+static bool AppendSetArgument(const PycRef<ASTSet>& dst, const PycRef<ASTNode>& src)
+{
+    if (src == nullptr)
+        return false;
+
+    if (src.type() == ASTNode::NODE_TUPLE) {
+        for (const auto& item : src.cast<ASTTuple>()->values())
+            dst->add(item);
+        return true;
+    }
+
+    if (src.type() == ASTNode::NODE_LIST) {
+        for (const auto& item : src.cast<ASTList>()->values())
+            dst->add(item);
+        return true;
+    }
+
+    if (src.type() == ASTNode::NODE_SET) {
+        for (const auto& item : src.cast<ASTSet>()->values())
+            dst->add(item);
+        return true;
+    }
+
+    if (src.type() == ASTNode::NODE_OBJECT) {
+        PycRef<PycObject> obj = src.cast<ASTObject>()->object();
+        if (obj->type() == PycObject::TYPE_TUPLE || obj->type() == PycObject::TYPE_SMALL_TUPLE
+                || obj->type() == PycObject::TYPE_LIST || obj->type() == PycObject::TYPE_SET
+                || obj->type() == PycObject::TYPE_FROZENSET) {
+            for (const auto& item : obj.cast<PycSimpleSequence>()->values())
+                dst->add(new ASTObject(item));
+            return true;
+        }
+    }
+
+    return false;
+}
+
 static bool IsCodeObjectNode(const PycRef<ASTNode>& node)
 {
     PycRef<ASTObject> obj = node.try_cast<ASTObject>();
@@ -1717,7 +1791,7 @@ PycRef<ASTNode> BuildFromCode(PycRef<PycCode> code, PycModule* mod)
                 PycRef<ASTNode> value = stack.top();
                 stack.pop();
 
-                PycRef<ASTNode> list = stack.top();
+                PycRef<ASTNode> list = (operand > 0) ? stack.top(operand) : stack.top();
 
 
                 if (curblock->blktype() == ASTBlock::BLK_FOR
@@ -1757,54 +1831,24 @@ PycRef<ASTNode> BuildFromCode(PycRef<PycCode> code, PycModule* mod)
             {
                 PycRef<ASTNode> rhs = stack.top();
                 stack.pop();
-                PycRef<ASTSet> lhs = stack.top().cast<ASTSet>();
-                stack.pop();
+                PycRef<ASTSet> lhs = stack.top(operand).try_cast<ASTSet>();
 
-                if (rhs.type() != ASTNode::NODE_OBJECT) {
+                if (lhs == nullptr || !AppendSetArgument(lhs, rhs)) {
                     fprintf(stderr, "Unsupported argument found for SET_UPDATE\n");
                     break;
                 }
-
-                // I've only ever seen this be a TYPE_FROZENSET, but let's be careful...
-                PycRef<PycObject> obj = rhs.cast<ASTObject>()->object();
-                if (obj->type() != PycObject::TYPE_FROZENSET) {
-                    fprintf(stderr, "Unsupported argument type found for SET_UPDATE\n");
-                    break;
-                }
-
-                ASTSet::value_t result = lhs->values();
-                for (const auto& it : obj.cast<PycSet>()->values()) {
-                    result.push_back(new ASTObject(it));
-                }
-
-                stack.push(new ASTSet(result));
             }
             break;
         case Pyc::LIST_EXTEND_A:
             {
                 PycRef<ASTNode> rhs = stack.top();
                 stack.pop();
-                PycRef<ASTList> lhs = stack.top().cast<ASTList>();
-                stack.pop();
+                PycRef<ASTList> lhs = stack.top(operand).try_cast<ASTList>();
 
-                if (rhs.type() != ASTNode::NODE_OBJECT) {
+                if (lhs == nullptr || !AppendSequenceArgument(lhs, rhs)) {
                     fprintf(stderr, "Unsupported argument found for LIST_EXTEND\n");
                     break;
                 }
-
-                // I've only ever seen this be a SMALL_TUPLE, but let's be careful...
-                PycRef<PycObject> obj = rhs.cast<ASTObject>()->object();
-                if (obj->type() != PycObject::TYPE_TUPLE && obj->type() != PycObject::TYPE_SMALL_TUPLE) {
-                    fprintf(stderr, "Unsupported argument type found for LIST_EXTEND\n");
-                    break;
-                }
-
-                ASTList::value_t result = lhs->values();
-                for (const auto& it : obj.cast<PycTuple>()->values()) {
-                    result.push_back(new ASTObject(it));
-                }
-
-                stack.push(new ASTList(result));
             }
             break;
         case Pyc::DICT_MERGE_A:
@@ -3787,6 +3831,7 @@ void print_src(PycRef<ASTNode> node, PycModule* mod, std::ostream& pyc_output)
             PycRef<ASTNode> src = node.cast<ASTStore>()->src();
             PycRef<ASTNode> dest = node.cast<ASTStore>()->dest();
             if (src.type() == ASTNode::NODE_FUNCTION) {
+                PycRef<ASTNode> code = src.cast<ASTFunction>()->code();
                 PycRef<PycCode> code_src = GetFunctionCodeObject(src);
                 if (code_src == nullptr) {
                     print_src(dest, mod, pyc_output);
