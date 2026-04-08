@@ -280,13 +280,14 @@ void bc_next(PycBuffer& source, PycModule* mod, int& opcode, int& operand, int& 
 {
     opcode = Pyc::ByteToOpcode(mod->majorVer(), mod->minorVer(), source.getByte());
     if (mod->verCompare(3, 6) >= 0) {
-        operand = source.getByte();
+        operand = 0;
         pos += 2;
-        if (opcode == Pyc::EXTENDED_ARG_A) {
-            opcode = Pyc::ByteToOpcode(mod->majorVer(), mod->minorVer(), source.getByte());
+        while (opcode == Pyc::EXTENDED_ARG_A) {
             operand = (operand << 8) | source.getByte();
+            opcode = Pyc::ByteToOpcode(mod->majorVer(), mod->minorVer(), source.getByte());
             pos += 2;
         }
+        operand = (operand << 8) | source.getByte();
     } else {
         operand = 0;
         pos += 1;
@@ -501,7 +502,12 @@ void bc_disasm(std::ostream& pyc_output, PycRef<PycCode> code, PycModule* mod,
             case Pyc::JUMP_IF_TRUE_OR_POP_A:
             case Pyc::JUMP_ABSOLUTE_A:
             case Pyc::JUMP_IF_NOT_EXC_MATCH_A:
-                if (mod->verCompare(3, 12) >= 0) {
+                if (mod->verCompare(3, 11) >= 0
+                        && (opcode == Pyc::JUMP_IF_FALSE_OR_POP_A
+                        || opcode == Pyc::JUMP_IF_TRUE_OR_POP_A)) {
+                    int offs = operand * sizeof(uint16_t);
+                    formatted_print(pyc_output, "%d (to %d)", operand, pos+offs);
+                } else if (mod->verCompare(3, 12) >= 0) {
                     // These are now relative as well
                     int offs = operand * sizeof(uint16_t);
                     formatted_print(pyc_output, "%d (to %d)", operand, pos+offs);
